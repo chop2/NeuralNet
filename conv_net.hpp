@@ -124,7 +124,7 @@ namespace wcv {
 		}
 	}
 	template<typename dtype>
-	/**@brief _Out = A(M,N) + msk_binary(M,N) * alpha * B(M,N) */
+	/**@brief _Out = A(M,N) + msk_binary(M,N) * alpha * B(M,N)  */
 	void gema(int M, int N, const dtype* A, const dtype* B, float alpha, const dtype* msk, dtype*& _Out) {
 		size_t nCount = M * N, i = 0;
 #ifdef USE_SSE
