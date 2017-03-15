@@ -177,14 +177,12 @@ namespace wcv {
 							for (int output_cols = output_w; output_cols; output_cols--) {
 								*(data_col++) = 0;
 							}
-						}
-						else {
+						} else {
 							int input_col = -pad_w + kernel_col;
 							for (int output_col = output_w; output_col; output_col--) {
 								if (is_a_ge_zero_and_a_lt_b(input_col, width)) {
 									*(data_col++) = data_im[input_row * width + input_col];
-								}
-								else {
+								} else {
 									*(data_col++) = 0;
 								}
 								input_col += stride_w;
@@ -205,8 +203,10 @@ class Tensor
 {
 public:
 	Tensor() :_shape(), _vdata() {};
-	Tensor(const vector<int> dim, dtype* data = nullptr) {
-		reshape(dim);
+	Tensor(const vector<int> dim, const dtype* data = nullptr) {
+		assert(dim.size() >= TENSOR_MIN_DIM);
+		_shape = _dim;
+		_vdata.resize(dim(), 0);
 		if (data != nullptr) {
 			for (size_t i = 0; i < count(); ++i) {
 				_vdata[i] = data[i];
@@ -247,7 +247,7 @@ public:
 			for (int i = 0; i < mat.rows; ++i) {
 				if (mat.type() == CV_32FC1)
 					array.insert(array.end(), (float*)mat.ptr<uchar>(i),
-					(float*)mat.ptr<uchar>(i) + mat.cols);
+					(float*)mat.ptr<uchar>(i) +mat.cols);
 			}
 		}
 		std::vector<float> arrayd(array.size());
@@ -257,23 +257,30 @@ public:
 	}
 #endif
 	~Tensor() { release(); };
-	void reshape(const vector<int>& dim) {
+	void reshape(const vector<int>& _dim) {
 		assert(dim.size() >= TENSOR_MIN_DIM);
-		_shape = dim;
+		_shape = _dim;
 		_vdata.resize(dim());
 	}
-	void reshape(const Tensor& rhs) {
+	void reshape_likes(const Tensor& rhs) {
 		_shape = rhs._shape;
 		_vdata.resize(rhs._vdata.size());
+		//_vdiff.resize(rhs._vdiff.size());
 	}
 	const dtype* const_data() {
 		return _vdata.data();
 	}
 	dtype* mutable_data() {
-		const_cast<dtype*>(_vdata.data());
+		return const_cast<dtype*>(_vdata.data());
 	}
-	dtype* offset(int n, int c) {
-		return const_cast<dtype*>(_vdata.data() + n * channels() + c);
+	//const dtype* const_diff(){
+	//	return _vdiff.data();
+	//}
+	//dtype* mutable_diff(){
+	//	return const_cast<dtype*>(_vdiff.data());
+	//}
+	dtype* offset(int n = 0, int c = 0,int h = 0,int w = 0) {
+		return const_cast<dtype*>(_vdata.data() + ((n*channels() + c)*height() + h)*width() + w);
 	}
 	void append(const Tensor& rhs) {
 		assert(_shape.size() == rhs.size());
@@ -332,6 +339,7 @@ public:
 private:
 	vector<int> _shape;
 	vector<dtype> _vdata;
+	//vector<dtype> _vdiff;
 };
 
 class LayerParam
@@ -387,7 +395,8 @@ protected:
 protected:
 	vector<Tensor<dtype> > _diff;
 	vector<Tensor<dtype> > _data;
-	vector<Tensor<dtype> > _weights;//_weights[0]->kernel weight ,_weights[1]->bias
+	//_weights[0]->kernel weight ,_weights[1]->bias
+	vector<Tensor<dtype> > _weights;
 };
 
 template<typename dtype>
@@ -428,7 +437,7 @@ public:
 		vector<int> output_shape;
 		calc_output_shape(input_shape, output_shape);
 		for (size_t i = 0; i < top.size(); ++i) {
-			top[i]->reshape(output_shape);
+			top[i] = Tensor<dtype>(output_shape);
 			_diff[i] = Tensor<dtype>(output_shape);
 			_data[i] = Tensor<dtype>(output_shape);
 		}
@@ -437,19 +446,25 @@ public:
 	}
 	virtual void Forward(const vector<Tensor<dtype>* >& bottom,
 		const vector<Tensor<dtype>* >& top) {
-		Tensor<dtype> weight_buff;
-		tensor_im2col(_weights[0], weight_buff);
+		float* weight = _weights[0].mutable_data();
 		for (size_t i = 0; i < bottom.size(); ++i) {
 			Tensor<dtype> col_buff;
 			tensor_im2col(*bottom[i], col_buff);
-			wcv::gemm(col_buff, weight_buff,
-				1., Tensor<dtype>(), 0., *top[i]);
+			int weight_dims = _weights[0].count(2);
+			for (size_t n = 0; n < bottom[i]->shape()[0]; ++n) {
+				for (size_t k = 0; k < _num_output; ++k) {
+					for (size_t c = 0; c < col_buff.shape()[1]; ++c) {
+						wcv::gemm(col_buff.shape()[2], col_buff.shape()[3], (dtype)1,
+							col_buff.offset(n, c), weight + k * weight_dim,
+							(dtype)1, top[i]->offset(n, c), (dtype)1, top[i]->offset(n, k));
+					}
+				}
+			}
+			//bias
+			wcv::gema(top[i]->shape()[2], top[i]->shape[3],
+				top[i]->const_data(), _weights[1].const_data(),
+				1, nullptr, top[i]->mutable_data());
 			_data[i] = *top[i];
-		}
-		for (size_t i = 0; i < bottom.size(); i++) {
-			wcv::gema(_data[i].shape()[2], _data[i].shape[3],
-				_data[i].const_data(), _weights[1].const_data(),
-				1, nullptr, _data[i].mutable_data());
 		}
 	}
 	virtual void Backward(const vector<Tensor<dtype>* >& top,
@@ -501,11 +516,12 @@ protected:
 	void tensor_im2col(const Tensor<dtype>& _In, Tensor<dtype>& _Out) {
 		int conv_out_h = (_In.shape()[2] + 2 * _pad_h - _kernel_h) / _stride_h + 1;
 		int conv_out_w = (_In.shape()[3] + 2 * _pad_w - _kernel_w) / _stride_w + 1;
+		int num_spatial_dim = conv_out_h * conv_out_w ;
 		vector<int> shape(4, 0);
 		shape[0] = _In.shape()[0];
 		shape[1] = _In.shape()[1];
-		shape[2] = conv_out_h;
-		shape[3] = conv_out_w;
+		shape[2] = num_spatial_dim;
+		shape[3] = _kernel_h * _kernel_w;
 		_Out.release();
 		_Out = Tensor<dtype>(shape);
 		wcv::im2col(_In.const_data(), _In.shape()[1], _In.shape()[2], _In.shape()[3],
