@@ -125,7 +125,7 @@ namespace wcv {
 	}
 	template<typename dtype>
 	/**@brief _Out = A(M,N) + msk_binary(M,N) * alpha * B(M,N)  */
-	void gema(int M, int N, const dtype* A, const dtype* B, float alpha, const dtype* msk, dtype*& _Out) {
+	void elemwise_add(int M, int N, const dtype* A, const dtype* B, float alpha, const dtype* msk, dtype*& _Out) {
 		size_t nCount = M * N, i = 0;
 #ifdef USE_SSE
 		if (std::is_same<typename std::decay<dtype>::type, float>::value &&
@@ -253,6 +253,17 @@ namespace wcv {
 			_Out[i] = A[i] * B[i];
 		}
 	}
+	template<typename dtype>
+	void Kronecker(int M, int N, int, int m, int n, const dtype* A, const dtype* B, dtype*& _Out) {
+		assert(A != nullptr && B != nullptr && _Out != nullptr);
+		size_t nCount = M * N;
+		size_t kSize = m * n;
+		for (size_t i = 0; i < nCount; ++i) {
+			for (size_t j = 0; j < kSize; ++j) {
+				*(_Out++) = A[i] * B[j];
+			}
+		}
+	}
 }
 
 #define TSR_MIN_DIM 4
@@ -271,6 +282,14 @@ public:
 				_vdata[i] = data[i];
 			}
 		}
+	}
+	Tensor(int num, int channels, int height, int width) {
+		vector<int> shape(4, 0);
+		shape[0] = num;
+		shape[1] = channels;
+		shape[2] = height;
+		shape[3] = width;
+		reshape(shape);
 	}
 #ifdef HAVE_OPENCV
 	Tensor(const vector<cv::Mat>& mvs) {
@@ -513,14 +532,14 @@ public:
 			for (size_t n = 0; n < bottom[i]->shape()[0]; ++n) {
 				for (size_t k = 0; k < _num_output; ++k) {
 					for (size_t c = 0; c < col_buff.shape()[1]; ++c) {
-						wcv::gemm(col_buff.shape()[2], col_buff.shape()[3], (dtype)1,
+						wcv::gemm<dtype>(col_buff.shape()[2], col_buff.shape()[3], (dtype)1,
 							col_buff.offset(n, c), weight + k * weight_dim,
 							(dtype)1, top[i]->offset(n, c), (dtype)1, top[i]->offset(n, k));
 					}
 				}
 			}
 			//bias
-			wcv::elemwise_add(top[i]->shape()[2], top[i]->shape[3],
+			wcv::elemwise_add<dtype>(top[i]->shape()[2], top[i]->shape[3],
 				top[i]->const_data(), _weights[1].const_data(),
 				1, nullptr, top[i]->mutable_data());
 			_data[i] = *top[i];
@@ -528,7 +547,7 @@ public:
 	}
 	virtual void Backward(const vector<Tensor<dtype>* >& top,
 		const vector<Tensor<dtype>* >& bottom) {
-		assert(top[0]->count(0) == bottom[0]->count());
+		assert(top[0]->count(0) == _data[0]->count());
 		for (size_t i = 0; i < top.size(); i++)	{
 			for (size_t n = 0; n < top[i]->shape()[0]; ++n)	{
 				for (size_t c = 0; c < top[i]->shape()[1]; ++c)	{
@@ -536,7 +555,6 @@ public:
 						top[i]->offset(n, c), _data[i].offset(n, c), bottom[i]->offset(n, c));
 				}
 			}
-			wcv::elemwise_mult()
 		}
 	}
 protected:
