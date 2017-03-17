@@ -203,8 +203,8 @@ namespace wcv {
 		const int pad_h, const int pad_w,
 		const int stride_h, const int stride_w,
 		dtype* data_im) {
-		memset(data_im,0, height * width * channels*sizeof(dtype))
-		const int output_h = (height + 2 * pad_h -
+		memset(data_im, 0, height * width * channels*sizeof(dtype))
+			const int output_h = (height + 2 * pad_h -
 			kernel_h + 1)) / stride_h + 1;
 		const int output_w = (width + 2 * pad_w -
 			kernel_w + 1)) / stride_w + 1;
@@ -237,12 +237,12 @@ namespace wcv {
 	/**@brief _Out = (A^alpha) .* (B^beta) */
 	void elemwise_mult(const int M, const int N, const dtype* A, const dtype* B, dtype*& _Out) {
 		assert(A != nullptr && B != nullptr);
-		size_t nCount = M * N,i = 0;
+		size_t nCount = M * N, i = 0;
 #ifdef USE_SSE
 		if (std::is_same<typename std::decay<dtype>::type, float>::value &&
 			nCount > 4) {
 			__m128 s, a, b;
-			for ( i = 0; i < nCount - 4; i +=4 ) {
+			for (i = 0; i < nCount - 4; i += 4) {
 				a = _mm_loadu_ps((float*)(A + i));
 				b = _mm_loadu_ps((float*)(B + i));
 				_mm_storeu_ps((float*)(_Out + i), _mm_mul_ps(a, b));
@@ -254,13 +254,24 @@ namespace wcv {
 		}
 	}
 	template<typename dtype>
-	void Kronecker(int M, int N, int, int m, int n, const dtype* A, const dtype* B, dtype*& _Out) {
+	void Kronecker(int M, int N, int m, int n, const dtype* A, const dtype* B, dtype*& _Out,bool norm=true) {
 		assert(A != nullptr && B != nullptr && _Out != nullptr);
 		size_t nCount = M * N;
 		size_t kSize = m * n;
+		dtype sum = 0;
 		for (size_t i = 0; i < nCount; ++i) {
-			for (size_t j = 0; j < kSize; ++j) {
-				*(_Out++) = A[i] * B[j];
+			sum = 0;
+			if (norm == true){
+				for (size_t j = 0; j < kSize; ++j) {
+					sum += A[i] * B[j];
+				}
+				for (size_t j = 0; j < kSize; ++j) {
+					*(_Out++) = A[i] * B[j] / sum;
+				}
+			} else{
+				for (size_t j = 0; j < kSize; ++j) {
+					*(_Out++) = A[i] * B[j];
+				}
 			}
 		}
 	}
@@ -277,6 +288,7 @@ public:
 		assert(dim.size() >= TENSOR_MIN_DIM);
 		_shape = _dim;
 		_vdata.resize(dim(), 0);
+		_vdiff.resize(dim(), 0);
 		if (data != nullptr) {
 			for (size_t i = 0; i < count(); ++i) {
 				_vdata[i] = data[i];
@@ -325,7 +337,7 @@ public:
 			for (int i = 0; i < mat.rows; ++i) {
 				if (mat.type() == CV_32FC1)
 					array.insert(array.end(), (float*)mat.ptr<uchar>(i),
-					(float*)mat.ptr<uchar>(i) + mat.cols);
+					(float*)mat.ptr<uchar>(i) +mat.cols);
 			}
 		}
 		std::vector<float> arrayd(array.size());
@@ -339,11 +351,12 @@ public:
 		assert(dim.size() >= TENSOR_MIN_DIM);
 		_shape = _dim;
 		_vdata.resize(dim());
+		_vdiff.resize(dim());
 	}
 	void reshape_likes(const Tensor& rhs) {
 		_shape = rhs._shape;
 		_vdata.resize(rhs._vdata.size());
-		//_vdiff.resize(rhs._vdiff.size());
+		_vdiff.resize(rhs._vdiff.size());
 	}
 	const dtype* const_data() {
 		return _vdata.data();
@@ -351,14 +364,17 @@ public:
 	dtype* mutable_data() {
 		return const_cast<dtype*>(_vdata.data());
 	}
-	//const dtype* const_diff(){
-	//	return _vdiff.data();
-	//}
-	//dtype* mutable_diff(){
-	//	return const_cast<dtype*>(_vdiff.data());
-	//}
+	const dtype* const_diff(){
+		return _vdiff.data();
+	}
+	dtype* mutable_diff(){
+		return const_cast<dtype*>(_vdiff.data());
+	}
 	dtype* offset(int n = 0, int c = 0, int h = 0, int w = 0) {
 		return const_cast<dtype*>(_vdata.data() + ((n*channels() + c)*height() + h)*width() + w);
+	}
+	dtype* offset_diff(int n = 0, int c = 0, int h = 0, int w = 0) {
+		return const_cast<dtype*>(_vdiff.data() + ((n*channels() + c)*height() + h)*width() + w);
 	}
 	void append(const Tensor& rhs) {
 		assert(_shape.size() == rhs.size());
@@ -374,6 +390,9 @@ public:
 	}
 	dtype& at(int n = 0, int c = 0, int h = 0, int w = 0) const {
 		return _vdata[((n*channels() + c)*height() + h)*width() + w];
+	}
+	dtype& at_diff(int n = 0, int c = 0, int h = 0, int w = 0) {
+		return _vdiff[((n*channels() + c)*height() + h)*width() + w];
 	}
 	vector<int>& shape() const {
 		return _shape;
@@ -417,43 +436,47 @@ public:
 private:
 	vector<int> _shape;
 	vector<dtype> _vdata;
-	//vector<dtype> _vdiff;
+	vector<dtype> _vdiff;
 };
 
 class LayerParam
 {
 public:
-	LayerParam() :_num_output(0) {};
-	LayerParam(int num_output) :_num_output(num_output) {};
+	LayerParam() :num_output(0) {};
+	LayerParam(int num_output_) :num_output(num_output_) {};
 	~LayerParam() {};
-protected:
-	int _num_output;
+	virtual bool checkParam() { return num_output != 0; };
+public:
+	int num_output;
 };
 
 class ConvParam :public LayerParam
 {
 public:
-	ConvParam() :LayerParam(0), _kernel_size(0), _kernel_h(0),
-		_kernel_w(0), _stride_w(0), _stride_h(0), _pad_h(0), _pad_w(0) {};
+	ConvParam() :LayerParam(0), kernel_h(0),
+		kernel_w(0), stride_w(0), stride_h(0), pad_h(0), pad_w(0) {};
 	ConvParam(int num_output, int kernel_size, int stride, int pad) :
-		LayerParam::LayerParam(num_output), _kernel_size(kernel_size),
-		_kernel_h(kernel_size), _kernel_w(kernel_size),
-		_stride_w(stride), _stride_h(stride), _pad_w(pad), _pad_h(pad) {};
+		LayerParam::LayerParam(num_output), kernel_h(kernel_size), kernel_w(kernel_size),
+		stride_w(stride), stride_h(stride), pad_w(pad), pad_h(pad) {};
 	ConvParam(int num_output, int kernel_h, int kernel_w,
 		int stride_h, int stride_w, int pad_h, int pad_w) :
-		LayerParam::LayerParam(num_output), _kernel_size(0),
-		_kernel_h(kernel_h), _kernel_w(kernel_w),
-		_stride_h(stride_h), _stride_w(stride_w),
-		_pad_h(pad_h), _pad_w(pad_w) {};
+		LayerParam::LayerParam(num_output), kernel_h(kernel_h), kernel_w(kernel_w),
+		stride_h(stride_h), stride_w(stride_w),
+		pad_h(pad_h), pad_w(pad_w) {};
 	~ConvParam() {};
-private:
-	int _kernel_size;
-	int _kernel_h;
-	int _kernel_w;
-	int _stride_h;
-	int _stride_w;
-	int _pad_h;
-	int _pad_w;
+	virtual bool checkParam() { 
+		return num_output != 0 &&
+			kernel_h != 0 && kernel_w != 0 &&
+			stride_h != 0 && stride_w != 0 &&
+			pad_h != 0 && pad_w != 0;
+	}
+public:
+	int kernel_h;
+	int kernel_w;
+	int stride_h;
+	int stride_w;
+	int pad_h;
+	int pad_w;
 };
 
 template<typename dtype>
@@ -471,8 +494,6 @@ public:
 protected:
 	void Init() {};
 protected:
-	vector<Tensor<dtype> > _diff;
-	vector<Tensor<dtype> > _data;
 	//_weights[0]->kernel weight ,_weights[1]->bias
 	vector<Tensor<dtype> > _weights;
 };
@@ -481,46 +502,37 @@ template<typename dtype>
 class ConvLayer :public Layer<dtype>
 {
 public:
-	ConvLayer() :_diff(), _data() {};
-	ConvLayer(LayerParam& _Param) {
-		ConvParam* convParam = dynamic_cast<ConvParam*>(&_Param);
+	ConvLayer() :_Param() {};
+	ConvLayer(LayerParam& Param_) {
+		ConvParam* convParam = dynamic_cast<ConvParam*>(&Param_);
 		assert(convParam != nullptr);
-		int kernel_h = convParam->_kernel_size > 0 ?
-			convParam->_kernel_size : convParam->_kernel_h;
-		int kernel_w = convParam->_kernel_size > 0 ?
-			convParam->_kernel_size : convParam->_kernel_w;
-		InitParam(convParam->_num_output, kernel_h,
-			kernel_w, convParam->_stride_h, convParam->_stride_w,
-			convParam->_pad_h, convParam->_pad_w);
+		_Param = *convParam;
+		assert(_Param.checkParam());
 		Init();
 	}
 	ConvLayer(int num_output, int kernel_size,
 		int stride, int pad) {
-		InitParam(num_output, kernel_size,
+		_Param = ConvParam(num_output, kernel_size,
 			kernel_size, stride, stride, pad, pad);
+		assert(_Param.checkParam());
 		Init();
 	}
 	ConvLayer(int num_output, int kernel_h, int kernel_w,
 		int stride_h, int stride_w, int pad_h, int pad_w) {
-		InitParam(num_output, kernel_h, kernel_w,
+		_Param = ConvParam(num_output, kernel_h, kernel_w,
 			stride_h, stride_w, pad_h, pad_w);
+		assert(_Param.checkParam());
 		Init();
 	}
 	~ConvLayer() {};
 	virtual void Reshape(const vector<Tensor<dtype>* >& bottom,
 		const vector<Tensor<dtype>* >& top) {
-		_diff.resize(bottom->size());
-		_data.resize(bottom->size());
 		vector<int> input_shape = bottom[0]->shape();
 		vector<int> output_shape;
 		calc_output_shape(input_shape, output_shape);
 		for (size_t i = 0; i < top.size(); ++i) {
 			top[i] = Tensor<dtype>(output_shape);
-			_diff[i] = Tensor<dtype>(output_shape);
-			_data[i] = Tensor<dtype>(output_shape);
 		}
-		output_shape[3] = 1; //n*c*h*1
-		_bias_multiplier.reshape(output_shape);
 	}
 	virtual void Forward(const vector<Tensor<dtype>* >& bottom,
 		const vector<Tensor<dtype>* >& top) {
@@ -542,50 +554,43 @@ public:
 			wcv::elemwise_add<dtype>(top[i]->shape()[2], top[i]->shape[3],
 				top[i]->const_data(), _weights[1].const_data(),
 				1, nullptr, top[i]->mutable_data());
-			_data[i] = *top[i];
 		}
 	}
 	virtual void Backward(const vector<Tensor<dtype>* >& top,
 		const vector<Tensor<dtype>* >& bottom) {
 		assert(top[0]->count(0) == _data[0]->count());
+		shared_ptr<dtype> col_buff(new dtype[bottom[0]->count(2)]);
+		int h = bottom[0]->shape()[2] / top[0]->shape()[2];
+		int w = bottom[0]->shape()[3] / top[0]->shape()[3];
+		vector<int> kroneckor(h*w, 1);
 		for (size_t i = 0; i < top.size(); i++)	{
 			for (size_t n = 0; n < top[i]->shape()[0]; ++n)	{
 				for (size_t c = 0; c < top[i]->shape()[1]; ++c)	{
-					wcv::elemwise_mult(top[i]->shape()[2], top[i]->shape()[3],
-						top[i]->offset(n, c), _data[i].offset(n, c), bottom[i]->offset(n, c));
+					//upsampling
+					wcv::Kronecker(top[i]->shape()[2], top[i]->shape()[3], h, w,
+						top[i]->offset_diff(n, c), kroneckor.data(), col_buff);
+					wcv::col2im(col_buff, top[0]->shape()[1], top[0]->count(2), kroneckor.size(),
+						h, w, 0, 0, h, w, bottom[i]->offset_diff(n,c));
+					wcv::elemwise_mult(bottom[i]->shape()[2], bottom[i]->shape()[3],
+						bottom[i]->offset_diff(n, c), bottom[i].offset(n, c), bottom[i]->offset_diff(n, c));
 				}
 			}
 		}
 	}
 protected:
-	void InitParam(int num_output, int kernel_h,
-		int kernel_w, int stride_h, int stride_w,
-		int pad_h, int pad_w) {
-		assert(num_output != 0 && kernel_h != 0 &&
-			kernel_w != 0 && stride_h != 0 &&
-			stride_w != 0 && pad_h != 0 && pad_w != 0);
-		_num_output = num_output;
-		_kernel_size = kernel_size;
-		_kernel_h = kernel_size;
-		_kernel_w = kernel_size;
-		_stride_h = stride_h;
-		_stride_w = stride_w;
-		_pad_h = pad_h;
-		_pad_w = pad_w;
-	}
 	void Init() {
 		_weights.resize(2);
 		//init weight
 		vector<int> shape(4);
 		shape[0] = 1;
-		shape[1] = _num_output;
-		shape[2] = _kernel_size == 0 ? _kernel_h : _kernel_size;
-		shape[3] = _kernel_size == 0 ? _kernel_w : _kernel_size;
+		shape[1] = _Param.num_output;
+		shape[2] = _Param.kernel_h;
+		shape[3] = _Param.kernel_w;
 		_weights[0] = Tensor<dtype>(shape);
 		wcv::randn(_weight[0], 0.F, 1.F);
 		//init bias
 		shape[0] = 1;
-		shape[1] = _num_output;
+		shape[1] = _Param.num_output;
 		shape[2] = 1;
 		shape[3] = 1;
 		_weights[1] = Tensor<dtype>(shape);
@@ -596,31 +601,131 @@ protected:
 		_Out.resize(4);
 		_Out[0] = _In[0];
 		_Out[1] = _num_output;
-		_Out[2] = (_In[2] + 2 * _pad_h - _kernel_h) / _stride_h + 1;
-		_Out[3] = (_In[3] + 2 * _pad_w - _kernel_w) / _stride_w + 1;
+		_Out[2] = (_In[2] + 2 * _Param.pad_h - _Param.kernel_h) / _Param.stride_h + 1;
+		_Out[3] = (_In[3] + 2 * _Param.pad_w - _Param.kernel_w) / _Param.stride_w + 1;
 	}
 	void tensor_im2col(const Tensor<dtype>& _In, Tensor<dtype>& _Out) {
-		int conv_out_h = (_In.shape()[2] + 2 * _pad_h - _kernel_h) / _stride_h + 1;
-		int conv_out_w = (_In.shape()[3] + 2 * _pad_w - _kernel_w) / _stride_w + 1;
+		int conv_out_h = (_In.shape()[2] + 2 * _Param.pad_h - _Param.kernel_h) / _Param.stride_h + 1;
+		int conv_out_w = (_In.shape()[3] + 2 * _Param.pad_w - _Param.kernel_w) / _Param.stride_w + 1;
 		int num_spatial_dim = conv_out_h * conv_out_w;
 		vector<int> shape(4, 0);
 		shape[0] = _In.shape()[0];
 		shape[1] = _In.shape()[1];
 		shape[2] = num_spatial_dim;
-		shape[3] = _kernel_h * _kernel_w;
+		shape[3] = _Param.kernel_h * _Param.kernel_w;
 		_Out.release();
 		_Out = Tensor<dtype>(shape);
 		wcv::im2col(_In.const_data(), _In.shape()[1], _In.shape()[2], _In.shape()[3],
-			_kernel_h, _kernel_w, _pad_h, _pad_w, _stride_h, _stride_w, _Out.mutable_data());
+			_Param.kernel_h, _Param.kernel_w, _Param.pad_h, 
+			_Param.pad_w, _Param.stride_h, _Param.stride_w, _Out.mutable_data());
 	}
 private:
-	int _num_output;
-	int _kernel_size;
+	ConvParam _Param;
+};
+
+
+template<typename dtype>
+class PoolParam:LayerParam<dtype>
+{
+public:
+	enum Flags {
+		MEAN = 0,
+		MAX = 1,
+	};
+	PoolParam() :LayerParam(0), _kernel_h(0),
+		_kernel_w(0), _stride_w(0), _stride_h(0), _pad_h(0), _pad_w(0), _type(0){};
+	PoolParam(int num_output, int kernel_size, int stride, int pad,int type=0) :
+		LayerParam::LayerParam(num_output), _kernel_h(kernel_size), _kernel_w(kernel_size),
+		_stride_w(stride), _stride_h(stride), _pad_w(pad), _pad_h(pad), _type(type) {};
+	PoolParam(int num_output, int kernel_h, int kernel_w,
+		int stride_h, int stride_w, int pad_h, int pad_w,int type=0) :
+		LayerParam::LayerParam(num_output), _kernel_h(kernel_h), _kernel_w(kernel_w),
+		_stride_h(stride_h), _stride_w(stride_w),
+		_pad_h(pad_h), _pad_w(pad_w),_type(type) {};
+	~PoolParam() {};
+	virtual bool checkParam() {
+		return num_output != 0 &&
+			kernel_h != 0 && kernel_w != 0 &&
+			stride_h != 0 && stride_w != 0 &&
+			pad_h != 0 && pad_w != 0;
+	}
+protected:
+	int _type;
 	int _kernel_h;
 	int _kernel_w;
 	int _stride_h;
-	int _stride_w
-		int _pad_h;
+	int _stride_w;
+	int _pad_h;
 	int _pad_w;
-	Tensor<dtype> _bias_multiplier;
+};
+
+template<typename dtype>
+class PoolLayer:public Layer<dtype>
+{
+public:
+	PoolLayer() :_Param() {};
+	PoolLayer(LayerParam& Param_) {
+		PoolParam* poolParam = dynamic_cast<PoolParam*>(&Param_);
+		assert(poolParam != nullptr);
+		_Param = *poolParam;
+		assert(_Param.checkParam());
+		Init();
+	}
+	PoolLayer(int num_output, int kernel_size,
+		int stride, int pad) {
+		_Param = PoolParam(num_output, kernel_size,
+			kernel_size, stride, stride, pad, pad);
+		assert(_Param.checkParam());
+		Init();
+	}
+	PoolLayer(int num_output, int kernel_h, int kernel_w,
+		int stride_h, int stride_w, int pad_h, int pad_w) {
+		_Param = PoolParam(num_output, kernel_h, kernel_w,
+			stride_h, stride_w, pad_h, pad_w);
+		assert(_Param.checkParam());
+		Init();
+	}
+	void Reshape(const vector<Tensor<dtype>* >& bottom, const vector<Tensor<dtype>* >& top){
+		vector<int> input_shape,output_shape;
+		input_shape = bottom[0]->shape();
+		calc_output_shape(input_shape, output_shape);
+		for (size_t i = 0; i < bottom.size(); ++i) {
+			top[i]->reshape(output_shape);
+		}
+	}
+	virtual void Forward(const vector<Tensor<dtype>* >& bottom, const vector<Tensor<dtype>* >& top){
+
+	}
+	virtual void Backward(const vector<Tensor<dtype>* >& top, const vector<Tensor<dtype>* >& bottom){
+
+	}
+protected:
+	void Init() {
+		_weights.resize(2);
+		//init weight
+		vector<int> shape(4);
+		shape[0] = 1;
+		shape[1] = _Param.num_output;
+		shape[2] = _Param.kernel_h;
+		shape[3] = _Param.kernel_w;
+		_weights[0] = Tensor<dtype>(shape);
+		wcv::randn(_weight[0], 0.F, 1.F);
+		//init bias
+		shape[0] = 1;
+		shape[1] = _Param.num_output;
+		shape[2] = 1;
+		shape[3] = 1;
+		_weights[1] = Tensor<dtype>(shape);
+		wcv::fill(_weights[1], 1);
+	}
+	void calc_output_shape(const vector<int>& _In, vector<int>& _Out) {
+		assert(_In.size() == 4);
+		_Out.resize(4);
+		_Out[0] = _In[0];
+		_Out[1] = _num_output;
+		_Out[2] = (_In[2] + 2 * _Param.pad_h - _Param.kernel_h) / _Param.stride_h + 1;
+		_Out[3] = (_In[3] + 2 * _Param.pad_w - _Param.kernel_w) / _Param.stride_w + 1;
+	}
+protected:
+	PoolParam _Param;
 };
